@@ -1,0 +1,4 @@
+Building unxcoin
+See doc/readme-qt.rst for instructions on building unxcoin QT.
+
+See doc/build-*.txt for instructions on building unxcoind.
