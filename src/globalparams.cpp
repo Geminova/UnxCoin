@@ -504,7 +504,7 @@ int GetLastFairLaunchBlock()
 
 int GetLastFirstDayBlock()
 {
-    return fTestNet ? LAST_FIRST_DAY_BLOCK_TESTNET : LAST_FIRST_DAY_BLOCK_TESTNET;
+    return fTestNet ? LAST_FIRST_DAY_BLOCK_TESTNET : LAST_FIRST_DAY_BLOCK;
 }    
 
 int GetLastPoWBlock()

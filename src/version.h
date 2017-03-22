@@ -31,7 +31,8 @@ static const int DATABASE_VERSION = 70508;
 //
 
 // 61014: original release version (v1.0.0.0)
-static const int PROTOCOL_VERSION = 61014;
+// 61015: original release version (v1.0.1.0)
+static const int PROTOCOL_VERSION = 61015;
 
 // earlier versions not supported as of Feb 2012, and are disconnected
 static const int MIN_PROTO_VERSION = 209;
