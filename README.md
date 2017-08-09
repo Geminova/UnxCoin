@@ -2,7 +2,7 @@
 
 ## Overview
 
-UnxCoin (UNH) is a global payment system where you can send to anywhere instantly. It has low transaction fees. There are no banks and no middleman.
+UnxCoin (UNH) is a global payment system where you can send to anywhere instantly. It has low transaction fees. There are no banks and no middleman. UnxCoin is the first to implement premium deposits.
 
 * Ticker: UNH
 * Block Times: 2 Minutes
