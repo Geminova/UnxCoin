@@ -32,7 +32,10 @@ static const int DATABASE_VERSION = 70508;
 
 // 61014: original release version (v1.0.0.0)
 // 61015: original release version (v1.0.1.0)
-static const int PROTOCOL_VERSION = 61015;
+// 61016: added deposits and withdrawals (v1.1.0.0)
+//        more fine grained address comparison (v1.1.1.0)
+// 61017: moved fork back 2 weeks (v1.1.2.0)
+static const int PROTOCOL_VERSION = 61017;
 
 // earlier versions not supported as of Feb 2012, and are disconnected
 static const int MIN_PROTO_VERSION = 209;

@@ -190,6 +190,9 @@ Value listunspent(const Array& params, bool fHelp)
             "Results are an array of Objects, each of which has:\n"
             "{txid, vout, scriptPubKey, amount, confirmations}");
 
+    // no reason to exclude multisig for this
+    static const bool fMultiSig = true;
+
     RPCTypeCheck(params, list_of(int_type)(int_type)(array_type));
 
     checkDefaultCurrency();
@@ -203,7 +206,6 @@ Value listunspent(const Array& params, bool fHelp)
         nMaxDepth = params[1].get_int();
 
     set<CBitcoinAddress> setAddress;
-
     if (params.size() > 2)
     {
         Array inputs = params[2].get_array();
@@ -212,11 +214,9 @@ Value listunspent(const Array& params, bool fHelp)
             CBitcoinAddress address(input.get_str());
             if (!address.IsValid())
                 throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, string("Invalid unxcoin address: ")+input.get_str());
-
             if (setAddress.count(address))
                 throw JSONRPCError(RPC_INVALID_PARAMETER, string("Invalid parameter, duplicated address: ")+input.get_str());
            setAddress.insert(address);
-
         }
     }
 
@@ -224,7 +224,7 @@ Value listunspent(const Array& params, bool fHelp)
 
     if (params.size() > 3)
     {
-        std::string strTicker = params[1].get_str();
+        std::string strTicker = params[3].get_str();
         if (!GetColorFromTicker(strTicker, nColor))
         {
                throw runtime_error(
@@ -244,7 +244,7 @@ Value listunspent(const Array& params, bool fHelp)
 
     Array results;
     vector<COutput> vecOutputs;
-    pwalletMain->AvailableCoins(nColor, vecOutputs, false);
+    pwalletMain->AvailableCoins(nColor, vecOutputs, fMultiSig, false);
     BOOST_FOREACH(const COutput& out, vecOutputs)
     {
         if (out.nDepth < nMinDepth || out.nDepth > nMaxDepth)
@@ -284,6 +284,126 @@ Value listunspent(const Array& params, bool fHelp)
     return results;
 }
 
+
+
+Value listdeposits(const Array& params, bool fHelp)
+{
+    if (fHelp || params.size() > 3)
+        throw runtime_error(
+            "listdeposits [minconf=1] [maxconf=9999999] [\"address\",...]\n"
+            "Returns array of unspent deposit outputs\n"
+            "with between [minconf] and [maxconf] (inclusive) confirmations.\n"
+            "Optionally filtered to only include txouts paid to specified addresses.\n"
+            "Results are an array of Objects, each of which has:\n"
+            "{txid, vout, scriptPubKey, amount, confirmations}");
+
+    // no reason to exclude multisig for this
+    static const bool fMultiSig = true;
+
+    RPCTypeCheck(params, list_of(int_type)(int_type)(array_type));
+
+    int nMinDepth = 1;
+    if (params.size() > 0)
+        nMinDepth = params[0].get_int();
+
+    int nMaxDepth = 9999999;
+    if (params.size() > 1)
+        nMaxDepth = params[1].get_int();
+
+    set<CBitcoinAddress> setAddress;
+    if (params.size() > 2)
+    {
+        Array inputs = params[2].get_array();
+        BOOST_FOREACH(Value& input, inputs)
+        {
+            CBitcoinAddress address(input.get_str());
+            if (!address.IsValid())
+            {
+                throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY,
+                        string("Invalid unxcoin address: ")+input.get_str());
+            }
+            if (setAddress.count(address))
+            {
+                throw JSONRPCError(RPC_INVALID_PARAMETER,
+                        string("Invalid parameter, duplicated address: ")+input.get_str());
+            }
+           setAddress.insert(address);
+        }
+    }
+
+    int nColor = UNX_COLOR_DPST;
+
+    set<CBitcoinAddress>::const_iterator adit;
+    for (adit = setAddress.begin(); adit != setAddress.end(); ++adit)
+    {
+        if (adit->nColor != nColor)
+        {
+            throw runtime_error(strprintf("Addresse(s) do not match Deposit currency %s.",
+                                                                COLOR_TICKER[nColor]));
+        }
+    }
+
+    CBlockIndex *pindexPrev = pindexBest;
+
+    Array results;
+    vector<COutput> vecOutputs;
+    pwalletMain->AvailableCoins(nColor, vecOutputs, fMultiSig, false);
+    // map<uint256, CWalletTx*> mapTx;
+    BOOST_FOREACH(const COutput& out, vecOutputs)
+    {
+        if (out.nDepth < nMinDepth || out.nDepth > nMaxDepth)
+            continue;
+
+        if(setAddress.size())
+        {
+            CTxDestination address;
+            if(!ExtractDestination(out.tx->vout[out.i].scriptPubKey, address))
+                continue;
+
+            CBitcoinAddress addr(address, nColor);
+
+            if (!setAddress.count(addr))
+                continue;
+        }
+
+        uint256 hash = out.tx->GetHash();
+        int64_t nValue = out.tx->GetValueOut(nColor);
+
+        const CScript& scriptPubKey = out.tx->vout[out.i].scriptPubKey;
+
+        // TODO: simplify this by refactoring GetMaxWithdrawal
+        CWalletTx tempwtx;
+        tempwtx.vout.push_back(CTxOut(nValue, UNX_COLOR_UNIH, scriptPubKey));
+        tempwtx.vin.push_back(CTxIn(hash, out.i));
+        MapPrevTx mapInputs;
+        mapInputs[hash].second = *(out.tx);
+
+        int64_t nEstFees = tempwtx.GetMinFee(pindexPrev);
+        int64_t nMaxWD = tempwtx.GetMaxWithdrawal(mapInputs) - nEstFees;
+
+        Object entry;
+        entry.push_back(Pair("txid", out.tx->GetHash().GetHex()));
+        entry.push_back(Pair("vout", out.i));
+        CTxDestination address;
+        if (ExtractDestination(scriptPubKey, address))
+        {
+            entry.push_back(Pair("address", CBitcoinAddress(address, nColor).ToString()));
+            if (pwalletMain->mapAddressBook.count(address))
+                entry.push_back(Pair("account", pwalletMain->mapAddressBook[address]));
+        }
+        entry.push_back(Pair("scriptPubKey",
+                               HexStr(scriptPubKey.begin(), scriptPubKey.end())));
+        entry.push_back(Pair("deposit amount",ValueFromAmount(nValue, UNX_COLOR_UNIH)));
+        entry.push_back(Pair("max withdraw",ValueFromAmount(nMaxWD, UNX_COLOR_UNIH)));
+        entry.push_back(Pair("currency", std::string(COLOR_TICKER[nColor])));
+        entry.push_back(Pair("confirmations", out.nDepth));
+        results.push_back(entry);
+    }
+
+    return results;
+}
+
+// TODO: createraw* all have a lot in commin, refactor is desirable
 Value createrawtransaction(const Array& params, bool fHelp)
 {
     if (fHelp || params.size() != 2)
@@ -369,7 +489,10 @@ Value createrawtransaction(const Array& params, bool fHelp)
         int64_t nAmount = AmountFromValue(s.value_, nColor);
 
         CTxOut out(nAmount, nColor, scriptPubKey);
-        printf("Pushing back %s\n", out.ToString().c_str());
+        if (fDebug)
+        {
+           printf("Pushing back %s\n", out.ToString().c_str());
+        }
         rawTx.vout.push_back(out);
     }
 
@@ -377,6 +500,393 @@ Value createrawtransaction(const Array& params, bool fHelp)
     ss << rawTx;
     return HexStr(ss.begin(), ss.end());
 }
+
+
+
+
+Value createrawdeposit(const Array& params, bool fHelp)
+{
+    if (fHelp || params.size() < 2 || params.size() > 3)
+        throw runtime_error(
+            "createrawdeposit [{\"txid\":txid,\"vout\":n},...] {address:amount,...} [check=false]\n"
+            "Make a premium depost that spends given UNH inputs\n"
+            "(array of objects containing transaction id and output number),\n"
+            "sending to given DPT address(es).\n"
+            "If [check] then the deposit is checked and returns deposit amount less estimated fee.\n"
+            "Returns hex-encoded raw transaction.\n"
+            "Note that the transaction's inputs are not signed, and\n"
+            "it is not stored in the wallet or transmitted to the network.");
+
+    RPCTypeCheck(params, list_of(array_type)(obj_type));
+
+    Array inputs = params[0].get_array();
+    Object sendTo = params[1].get_obj();
+
+    bool fCheck = false;
+    if (params.size() > 2)
+    {
+        fCheck = params[2].get_bool();
+    }
+
+    int64_t nValueUNHIn = 0;
+    int64_t nValuePRMIn = 0;
+
+    CTransaction rawTx;
+    BOOST_FOREACH(Value& input, inputs)
+    {
+        const Object& o = input.get_obj();
+
+        const Value& txid_v = find_value(o, "txid");
+        if (txid_v.type() != str_type)
+        {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter, missing txid key");
+        }
+        string txid = txid_v.get_str();
+        if (!IsHex(txid))
+        {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter, expected hex txid");
+        }
+
+        const Value& vout_v = find_value(o, "vout");
+        if (vout_v.type() != int_type)
+        {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter, missing vout key");
+        }
+        int nvout_v = vout_v.get_int();
+        if (nvout_v < 0)
+        {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter, vout must be positive");
+        }
+
+        unsigned int nOutput = (unsigned int) nvout_v;
+
+        uint256 hash(txid);
+        CTransaction tx;
+        if (pwalletMain->mapWallet.count(hash))
+        {
+            tx = pwalletMain->mapWallet[hash];
+        }
+        else
+        {
+            uint256 hashBlock = 0;
+            if (!GetTransaction(hash, tx, hashBlock))
+            {
+                throw runtime_error("No information available about transaction");
+            }
+        }
+        if (tx.vout.size() <= nOutput)
+        {
+            throw runtime_error("No such output.\n");
+        }
+
+        if (tx.vout[nOutput].nColor == UNX_COLOR_UNIH)
+        {
+            nValueUNHIn += tx.vout[nOutput].nValue;
+        }
+        else if (tx.vout[nOutput].nColor == UNX_COLOR_PREM)
+        {
+            nValuePRMIn += tx.vout[nOutput].nValue;
+        }
+        else
+        {
+            throw runtime_error("Not all inputs are UNH.\n");
+        }
+
+        CTxIn in(COutPoint(uint256(txid), nOutput));
+        rawTx.vin.push_back(in);
+    }
+
+    if (!((nValueUNHIn > 0) && (nValuePRMIn > 0)))
+    {
+        throw runtime_error("Must povide both UNH and PRM to create a deposit.\n");
+    }
+
+    int64_t nValuePRMOut = 0;
+    int64_t nValueDPTOut = 0;
+
+#if ALLOW_DUPLICATE_DESTINATIONS != 1
+    set<CBitcoinAddress> setAddress;
+#endif
+
+    BOOST_FOREACH(const Pair& s, sendTo)
+    {
+        CBitcoinAddress address(s.name_);
+        if (!address.IsValid())
+            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, string("Invalid unxcoin address: ")+s.name_);
+
+#if ALLOW_DUPLICATE_DESTINATIONS != 1
+        if (setAddress.count(address))
+            throw JSONRPCError(RPC_INVALID_PARAMETER, string("Invalid parameter, duplicated address: ")+s.name_);
+        setAddress.insert(address);
+#endif
+
+        CScript scriptPubKey;
+        scriptPubKey.SetDestination(address.Get());
+        int nColor = address.nColor;
+        int64_t nAmount = AmountFromValue(s.value_, nColor);
+        if (nColor == UNX_COLOR_PREM)
+        {
+            if ((nValuePRMOut > 0) || (nValueDPTOut > 0))
+            {
+                throw runtime_error("First output must be PRM, rest must be UNH.\n");
+            }
+            nValuePRMOut += nAmount;
+        }
+        else if (nColor == UNX_COLOR_DPST)
+        {
+            if (nValuePRMOut <= 0)
+            {
+                throw runtime_error("First output must be PRM, rest must be UNH.\n");
+            }
+            nValueDPTOut += nAmount;
+        }
+        else
+        {
+            throw runtime_error("Not all destinations for deposit are PRM or DPT.\n");
+        }
+
+        CTxOut out(nAmount, nColor, scriptPubKey);
+        if (fDebug)
+        {
+           printf("Pushing back %s\n", out.ToString().c_str());
+        }
+        rawTx.vout.push_back(out);
+    }
+
+    if (nValuePRMOut != nValuePRMIn)
+    {
+        throw runtime_error("PRM out must equal PRM in.\n");
+    }
+
+    CBlockIndex *pindexPrev = pindexBest;
+
+    int64_t nMinFee = rawTx.GetMinFee(pindexPrev);
+
+    if ((!fCheck) && ((nValueDPTOut + nMinFee) > nValueUNHIn))
+    {
+        throw runtime_error(strprintf("Not enough fees. Minimim: %s\n",
+                                      FormatMoney(nMinFee, UNX_COLOR_UNIH).c_str()));
+    }
+
+    if ((!fCheck) && ((nValueDPTOut + (2 * nMinFee)) < nValueUNHIn))
+    {
+        throw runtime_error(strprintf("Much more fee provided than necessary. "
+                                      "Suggested: %s\n",
+                                      FormatMoney(nMinFee, UNX_COLOR_UNIH).c_str()));
+    }
+
+    if (fCheck)
+    {
+        return ValueFromAmount(nValueUNHIn - nMinFee, UNX_COLOR_UNIH);
+    }
+    else
+    {
+        CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
+        ss << rawTx;
+        return HexStr(ss.begin(), ss.end());
+    }
+}
+
+Value createrawwithdrawal(const Array& params, bool fHelp)
+{
+    if (fHelp || params.size() < 2 || params.size() > 3)
+        throw runtime_error(
+            "createrawwithdrawal [{\"txid\":txid,\"vout\":n},...] {address:amount,...} [check=false]\n"
+            "Make a premium withdrawal that redeems given DPT inputs\n"
+            "(array of objects containing transaction id and output number),\n"
+            "sending to given UNH address(es).\n"
+            "If [check] then the withdrawal is checked and returns max WD less estimated fees.\n"
+            "Returns hex-encoded raw transaction.\n"
+            "Note that the transaction's inputs are not signed, and\n"
+            "it is not stored in the wallet or transmitted to the network.");
+
+    RPCTypeCheck(params, list_of(array_type)(obj_type));
+
+    Array inputs = params[0].get_array();
+    Object sendTo = params[1].get_obj();
+
+    bool fCheck = false;
+    if (params.size() > 2)
+    {
+        fCheck = params[2].get_bool();
+    }
+
+    int64_t nValueDPTIn = 0;
+
+    CTransaction rawTx;
+    BOOST_FOREACH(Value& input, inputs)
+    {
+        const Object& o = input.get_obj();
+
+        const Value& txid_v = find_value(o, "txid");
+        if (txid_v.type() != str_type)
+        {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter, missing txid key");
+        }
+        string txid = txid_v.get_str();
+        if (!IsHex(txid))
+        {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter, expected hex txid");
+        }
+
+        const Value& vout_v = find_value(o, "vout");
+        if (vout_v.type() != int_type)
+        {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter, missing vout key");
+        }
+        int nvout_v = vout_v.get_int();
+        if (nvout_v <= 0)
+        {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter, vout must be positive");
+        }
+
+        unsigned int nOutput = (unsigned int) nvout_v;
+
+        uint256 hash(txid);
+        CTransaction tx;
+        if (pwalletMain->mapWallet.count(hash))
+        {
+            tx = pwalletMain->mapWallet[hash];
+        }
+        else
+        {
+            uint256 hashBlock = 0;
+            if (!GetTransaction(hash, tx, hashBlock))
+            {
+                throw runtime_error("No information available about transaction");
+            }
+        }
+        if (tx.vout.size() <= nOutput)
+        {
+            throw runtime_error("No such output.\n");
+        }
+
+        if (tx.vout[nOutput].nColor == UNX_COLOR_DPST)
+        {
+            nValueDPTIn += tx.vout[nOutput].nValue;
+        }
+        else
+        {
+            throw runtime_error("Not all inputs are DPT.\n");
+        }
+
+        CTxIn in(COutPoint(uint256(txid), nOutput));
+        rawTx.vin.push_back(in);
+    }
+
+    if (!(nValueDPTIn > 0))
+    {
+        throw runtime_error("Must povide DPT to withdrawal.\n");
+    }
+
+    int64_t nValueUNHOut = 0;
+
+#if ALLOW_DUPLICATE_DESTINATIONS != 1
+    set<CBitcoinAddress> setAddress;
+#endif
+
+    CScript scriptMarker;
+    scriptMarker << OP_RETURN;
+    CTxOut out(0, UNX_COLOR_DPST, scriptMarker);
+    rawTx.vout.push_back(out);
+
+    BOOST_FOREACH(const Pair& s, sendTo)
+    {
+        CBitcoinAddress address(s.name_);
+        if (!address.IsValid())
+        {
+            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY,
+                      string("Invalid unxcoin address: ")+s.name_);
+        }
+
+#if ALLOW_DUPLICATE_DESTINATIONS != 1
+        if (setAddress.count(address))
+        {
+            throw JSONRPCError(RPC_INVALID_PARAMETER,
+                      string("Invalid parameter, duplicated address: ")+s.name_);
+        }
+        setAddress.insert(address);
+#endif
+
+        CScript scriptPubKey;
+        scriptPubKey.SetDestination(address.Get());
+        int nColor = address.nColor;
+        int64_t nAmount;
+
+        if (nColor == UNX_COLOR_UNIH)
+        {
+            nAmount = AmountFromValue(s.value_, nColor);
+            nValueUNHOut += nAmount;
+        }
+        else
+        {
+            throw JSONRPCError(RPC_INVALID_PARAMETER,
+                      string("Destinations for withdrawal must be UNH."));
+        }
+
+        CTxOut out(nAmount, nColor, scriptPubKey);
+        if (fDebug)
+        {
+           printf("createrawwithdrawal(): Pushing back %s\n",
+                                            out.ToString().c_str());
+        }
+
+        rawTx.vout.push_back(out);
+    }
+
+    // fetch inputs to calculate max withdrawal
+    MapPrevTx mapInputs;
+    CTxDB txdb("r");
+    map<uint256, CTxIndex> unused;
+    bool fInvalid;
+    bool fResult = rawTx.FetchInputs(txdb, unused, false, false, mapInputs, fInvalid);
+    if (!fResult)
+    {
+        if (fInvalid)
+        {
+            throw runtime_error("Invalid transaction when fetching inputs.");
+        }
+        throw runtime_error("Could not fetch inputs.");
+    }
+
+    if (!rawTx.IsWithdrawal(&mapInputs))
+    {
+            throw JSONRPCError(RPC_INVALID_PARAMETER,
+                      string("Output transaction is not a withdrawal."));
+    }
+
+    int64_t nMaxWD = rawTx.GetMaxWithdrawal(mapInputs);
+
+    CBlockIndex *pindexPrev = pindexBest;
+
+    int64_t nMinFee = rawTx.GetMinFee(pindexPrev);
+
+    if ((!fCheck) && ((nValueUNHOut + nMinFee) > nMaxWD))
+    {
+        throw runtime_error(strprintf("Not enough fees. Minimim: %s\n",
+                                      FormatMoney(nMinFee, UNX_COLOR_UNIH).c_str()));
+    }
+
+    if ((!fCheck) && ((nValueUNHOut + (2 * nMinFee)) < nMaxWD))
+    {
+        throw runtime_error(strprintf("Much more fee provided than necessary. "
+                                      "Suggested: %s\n",
+                                      FormatMoney(nMinFee, UNX_COLOR_UNIH).c_str()));
+    }
+
+    if (fCheck)
+    {
+        return ValueFromAmount(nMaxWD - nMinFee, UNX_COLOR_UNIH);
+    }
+    else
+    {
+        CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
+        ss << rawTx;
+        return HexStr(ss.begin(), ss.end());
+    }
+}
+
+
 
 Value decoderawtransaction(const Array& params, bool fHelp)
 {
@@ -463,6 +973,7 @@ Value signrawtransaction(const Array& params, bool fHelp)
 
     vector<unsigned char> txData(ParseHex(params[0].get_str()));
     CDataStream ssData(txData, SER_NETWORK, PROTOCOL_VERSION);
+    // why is vector needed here?
     vector<CTransaction> txVariants;
     while (!ssData.empty())
     {
@@ -496,7 +1007,15 @@ Value signrawtransaction(const Array& params, bool fHelp)
 
         // FetchInputs aborts on failure, so we go one at a time.
         tempTx.vin.push_back(mergedTx.vin[i]);
-        tempTx.FetchInputs(txdb, unused, false, false, mapPrevTx, fInvalid);
+        bool fResult = tempTx.FetchInputs(txdb, unused, false, false, mapPrevTx, fInvalid);
+        if (!fResult)
+        {
+            if (fInvalid)
+            {
+                throw runtime_error("Invalid transaction when fetching inputs.");
+            }
+            throw runtime_error("Could not fetch inputs.");
+        }
 
         // Copy results into mapPrevOut:
         BOOST_FOREACH(const CTxIn& txin, tempTx.vin)
@@ -595,6 +1114,8 @@ Value signrawtransaction(const Array& params, bool fHelp)
 
     bool fHashSingle = ((nHashType & ~SIGHASH_ANYONECANPAY) == SIGHASH_SINGLE);
 
+    Object result;
+
     // Sign what we can:
     for (unsigned int i = 0; i < mergedTx.vin.size(); i++)
     {
@@ -609,18 +1130,26 @@ Value signrawtransaction(const Array& params, bool fHelp)
         txin.scriptSig.clear();
         // Only sign SIGHASH_SINGLE if there's a corresponding output:
         if (!fHashSingle || (i < mergedTx.vout.size()))
-            SignSignature(keystore, prevPubKey, mergedTx, i, nHashType);
+        {
+            uint8_t iSSResult = SignSignature(keystore, prevPubKey, mergedTx, i, nHashType);
+            if (fDebug && (iSSResult > 0))
+            {
+                printf("signrawtransaction: Problem signing with SignSignature: %d\n", (int) iSSResult);
+            }
+        }
 
         // ... and merge in other signatures:
         BOOST_FOREACH(const CTransaction& txv, txVariants)
         {
+            // txin.scriptSig starts empty (cleared above)
             txin.scriptSig = CombineSignatures(prevPubKey, mergedTx, i, txin.scriptSig, txv.vin[i].scriptSig);
         }
         if (!VerifyScript(txin.scriptSig, prevPubKey, mergedTx, i, STANDARD_SCRIPT_VERIFY_FLAGS, 0))
+        {
             fComplete = false;
+        }
     }
 
-    Object result;
     CDataStream ssTx(SER_NETWORK, PROTOCOL_VERSION);
     ssTx << mergedTx;
     result.push_back(Pair("hex", HexStr(ssTx.begin(), ssTx.end())));

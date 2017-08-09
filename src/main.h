@@ -157,7 +157,7 @@ unsigned int ComputeMinStake(unsigned int nBase, int64_t nTime, unsigned int nBl
 int GetNumBlocksOfPeers();
 bool IsInitialBlockDownload();
 std::string GetWarnings(std::string strFor, int nAlertType=(int)ALERT_CLASSIC);
-bool IsConfirmedInNPrevBlocks(const CTxIndex& txindex, const CBlockIndex* pindexFrom, int nMaxDepth, int&     nActualDepth);
+bool IsConfirmedInNPrevBlocks(const CTxIndex& txindex, const CBlockIndex* pindexFrom, int nMaxDepth, int& nActualDepth);
 bool GetTransaction(const uint256 &hash, CTransaction &tx, uint256 &hashBlock);
 uint256 WantedByOrphan(const COrphanBlock* pblockOrphan);
 const CBlockIndex* GetLastBlockIndex(const CBlockIndex* pindex, bool fProofOfStake);
@@ -589,11 +589,16 @@ public:
             nBlockHeight = nBestHeight;
         if (nBlockTime == 0)
             nBlockTime = GetAdjustedTime();
-        if ((int64_t)nLockTime < ((int64_t)nLockTime < LOCKTIME_THRESHOLD ? (int64_t)nBlockHeight : nBlockTime))
+        if ((int64_t)nLockTime < ((int64_t)nLockTime < LOCKTIME_THRESHOLD ?
+                                             (int64_t)nBlockHeight : nBlockTime))
+        {
             return true;
+        }
         BOOST_FOREACH(const CTxIn& txin, vin)
+        {
             if (!txin.IsFinal())
                 return false;
+        }
         return true;
     }
 
@@ -768,16 +773,48 @@ public:
         return nValueOut;
     }
 
-
+    // color of "principal" output currency
     int GetColor() const
     {
         if (vout.size() == 0)
         {
               return (int) UNX_COLOR_NONE;
         }
+        if (IsDeposit())
+        {
+              return UNX_COLOR_DPST;
+        }
+        else if (IsWithdrawal())
+        {
+              return UNX_COLOR_UNIH;
+        }
         return vout[0].nColor;
     }
 
+    // Fee color is the color fees are *collected* in, by miner
+    // TODO: probably should have GetFeePayColor and GetFeeCollectionColor
+    //       or maybe GetFeeInColor and GetFeeOutColor
+    int GetFeeColor(MapPrevTx const *pMapInputs = NULL) const
+    {
+        int nColor;
+        if ((vout.size() == 0) || IsCoinStake() || IsCoinBase())
+        {
+            nColor = UNX_COLOR_NONE;
+        }
+        else if (IsDeposit())
+        {
+            nColor = UNX_COLOR_UNIH;
+        }
+        else if (IsWithdrawal())
+        {
+            nColor = UNX_COLOR_UNIH;
+        }
+        else
+        {
+            nColor = FEE_COLOR[vout[0].nColor];
+        }
+        return nColor;
+    }
 
     int GetStakeColor() const
     {
@@ -820,7 +857,8 @@ public:
 
     void FillValuesIn(const MapPrevTx& inputs, std::map<int, int64_t> &mapValuesIn) const;
 
-    int64_t GetMinFee(unsigned int nBlockSize=1, enum GetMinFee_mode mode=GMF_BLOCK, unsigned int nBytes = 0) const;
+    int64_t GetMinFee(const CBlockIndex* pindexPrev, unsigned int nBlockSize=1,
+                      enum GetMinFee_mode mode=GMF_BLOCK, unsigned int nBytes = 0) const;
 
     bool ReadFromDisk(CDiskTxPos pos, FILE** pfileRet=NULL)
     {
@@ -928,6 +966,39 @@ public:
     bool FetchInputs(CTxDB& txdb, const std::map<uint256, CTxIndex>& mapTestPool,
                      bool fBlock, bool fMiner, MapPrevTx& inputsRet, bool& fInvalid);
 
+
+    // Is this a premium deposit?
+    //     Only after PREMIUM_START_TIME
+    //     Deposits: fees are paid in non-PREM input currency (UNH).
+    //               tx color is non-PREM output currency (DPT)
+    //     Deposits need to have some structural constraints for simpler validation.
+    //       - vout.size >= 2
+    //       - vout[0].nColor == UNX_COLOR_PREM
+    //       - other vouts nColor must be UNX_COLOR_DPST
+    //     Inputs are checked if provided (for validation)
+    //       - inputs can be unordered
+    //       - inputs must be only PRM or DPT
+    // TODO: use overloading and a reference instead of pointer with default arg
+    bool IsDeposit(MapPrevTx const *pinputs = NULL) const;
+
+    // Is a withdrawal from a premium deposit?
+    //     Only after PREMIUM_START_TIME
+    //     Withdrawals need to have some structure constraints for simpler validation.
+    //     There is no need to prove the ownership of PREMIUM for a withdrawal.
+    //       - vout.size >= 2
+    //       - vout[0] must be 0 value DPT "burn", i.e. where scriptPubKey == OP_RETURN
+    //         see IsOpReturn()
+    //       - rest of vout must be UNH
+    //     Inputs are checked if provided (for validation)
+    //       - inputs must all be DPT
+    // TODO: use overloading and a reference instead of pointer with default arg
+    bool IsWithdrawal(MapPrevTx const *pinputs = NULL) const;
+
+
+    // Max amount that can be withdrawn from a premium deposit
+    int64_t GetMaxWithdrawal(const MapPrevTx inputs);
+
+
     /** Sanity check previous transactions, then, if all checks succeed,
         mark them as spent by this transaction.
 
@@ -947,7 +1018,7 @@ public:
     bool AcceptToMemoryPool(CTxDB& txdb, bool fCheckInputs=true, bool* pfMissingInputs=NULL);
     bool GetCoinAge(CTxDB& txdb, const CBlockIndex* pindexPrev, uint64_t& nCoinAge) const;  // ppcoin: get transaction coin age
 
-    int64_t GetSwiftFee() const;
+    int64_t GetServiceFee() const;
     int64_t GetOpRetFee() const;
 
 protected:
@@ -1664,11 +1735,44 @@ public:
         READWRITE(nFile);
         READWRITE(nBlockPos);
         READWRITE(nHeight);
+
         READWRITE(vCoinbase);
+        // CRITICAL: vCoinbase, vMoneySupply, and vTotalMint do not include DPT
+        // FIXME: store in index for dynamically created currencies?
+        // rather than check version everywhere fix upon reading
+        // if (vCoinbase.size() < N_COLORS)
+        // {
+        //    for (int i = vCoinbase.size(); i < N_COLORS; ++i)
+        //    {
+        //        vCoinbase.push_back(0);
+        //    }
+        // }
+
         READWRITE(nCoinbaseColor);
         READWRITE(nStakeColor);
+
         READWRITE(vMoneySupply);
+        // FIXME: store in index for dynamically created currencies?
+        // rather than check version everywhere fix upon reading
+        // if (vMoneySupply.size() < N_COLORS)
+        // {
+        //    for (int i = vMoneySupply.size(); i < N_COLORS; ++i)
+        //    {
+        //        vCoinbase.push_back(0);
+        //    }
+        // }
+
         READWRITE(vTotalMint);
+        // FIXME: store in index for dynamically created currencies?
+        // rather than check version everywhere fix upon reading
+        // if (vTotalMint.size() < N_COLORS)
+        // {
+        //    for (int i = vTotalMint.size(); i < N_COLORS; ++i)
+        //    {
+        //        vTotalMint.push_back(0);
+        //    }
+        // }
+
         READWRITE(nFlags);
         READWRITE(bnStakeModifier);
         if (IsProofOfStake())

@@ -43,9 +43,6 @@ CBigNum bnProofOfStakeLimit(~uint256(0) >> 14);
 CBigNum bnProofOfWorkLimitTestNet(~uint256(0) >> 14);
 CBigNum bnProofOfStakeLimitTestNet(~uint256(0) >> 8);
 
-
-// bgw can have independent block spacings for PoS and PoW
-// but with multicurrency hybrid PoW/PoS, there is no need
 unsigned int nStakeMinAge = 60 * 60 * 8; // 8 hr
 unsigned int nStakeMaxAge = 60 * 60 * 24 * 2; // 2 days
 unsigned int nStakeMinAgeTestNet = 1 * 60; // test net min age is 1 min
@@ -137,10 +134,10 @@ void UnregisterWallet(CWallet* pwalletIn)
 }
 
 // check whether the passed transaction is from us
-bool static IsFromMe(CTransaction& tx)
+bool static IsFromMe(CTransaction& tx, bool fMultiSig)
 {
     BOOST_FOREACH(CWallet* pwallet, setpwalletRegistered)
-        if (pwallet->IsFromMe(tx))
+        if (pwallet->IsFromMe(tx, fMultiSig))
             return true;
     return false;
 }
@@ -164,13 +161,16 @@ void static EraseFromWallets(uint256 hash)
 // make sure all wallets know about the given transaction, in the given block
 void SyncWithWallets(const CTransaction& tx, const CBlock* pblock, bool fUpdate, bool fConnect)
 {
+    // no reason why multisig should prevent a tx from syncing with all wallets
+    static const bool fMultiSig = true;
+
     if (!fConnect)
     {
         // ppcoin: wallets need to refund inputs when disconnecting coinstake
         if (tx.IsCoinStake())
         {
             BOOST_FOREACH(CWallet* pwallet, setpwalletRegistered)
-                if (pwallet->IsFromMe(tx))
+                if (pwallet->IsFromMe(tx, fMultiSig))
                     pwallet->DisableTransaction(tx);
         }
         return;
@@ -288,11 +288,6 @@ unsigned int LimitOrphanTxSize(unsigned int nMaxOrphans)
 }
 
 
-
-
-
-
-
 //////////////////////////////////////////////////////////////////////////////
 //
 // CTransaction and CTxIndex
@@ -342,7 +337,6 @@ bool CTransaction::IsStandard() const
     //     means all outputs have colors of vout[0] or
     //     the color of the fee delegate.
     // Coinbase may have transaction fee outputs of varying colors.
-    int nColor = GetColor();
     for (unsigned int i = 0; i < vout.size(); ++i)
     {
         int c = vout[i].nColor;
@@ -352,9 +346,16 @@ bool CTransaction::IsStandard() const
         }
     }
 
-    int nFeeColor = FEE_COLOR[nColor];
-    
-    if (!IsCoinBase())
+    int nColor = GetColor();
+    int nFeeColor = GetFeeColor();
+
+    // Fee change for deposits and withdrawals:
+    // 1. no fee change for deposits, this means to deduct fees from the DPT
+    //    which poses no issues since UNH -> DPT is 1:1 for deposits
+    // 2. for withdrawals, fees come out of outputs, meaning no fee change
+    //    is necessary
+    // note that IsCoinBase, IsDeposit, and IsWithdrawal contain color checks
+    if (!(IsCoinBase() || IsDeposit() || IsWithdrawal()))
     {
         std::vector<CTxOut>::const_iterator it;
         for (it = vout.begin() + 1; it != vout.end(); ++it)
@@ -440,8 +441,9 @@ bool CTransaction::IsStandard() const
                   return false;
             nTxnOut++;
         }
-            if (fEnforceCanonical && !txout.scriptPubKey.HasCanonicalPushes())
-                  return false;
+
+        if (fEnforceCanonical && !txout.scriptPubKey.HasCanonicalPushes())
+              return false;
     }
 
     if (nDataOut > nTxnOut) {
@@ -468,6 +470,101 @@ bool IsFinalTx(const CTransaction &tx, int nBlockHeight, int64_t nBlockTime)
         if (!txin.IsFinal())
             return false;
     return true;
+}
+
+
+bool CTransaction::IsDeposit(MapPrevTx const *pinputs) const
+{
+    // test general structure
+    if (vout.size() < 2 || vin.size() < 2)
+    {
+        return false;
+    }
+
+    // TODO: reverse this test to make function easier to follow
+    // test marker CTxOuts
+    if (((this->nTime >= PREMIUM_START_TIME) || fTestNet) &&
+        (vout[0].nColor == UNX_COLOR_PREM) &&
+        (vout[1].nColor == UNX_COLOR_DPST))
+    {
+        // test rest of vout
+        for (unsigned int i = 2; i < vout.size(); ++i)
+        {
+            if (vout[i].nColor != UNX_COLOR_DPST)
+            {
+                return false;
+            }
+        }
+        // test inputs if given
+        if (pinputs)
+        {
+            MapPrevTx const &inputs = *pinputs;
+            // check that all inputs are either PRM or UNH
+            for (unsigned int i = 0; i < vin.size(); ++i)
+            {
+                COutPoint prevout = vin[i].prevout;
+                MapPrevTx::const_iterator mi = inputs.find(prevout.hash);
+                if (mi == inputs.end())
+                {
+                    throw std::runtime_error("IsDeposit() : prevout.hash not found");
+                }
+                int nColor = mi->second.second.vout[prevout.n].nColor;
+                if ((nColor != UNX_COLOR_PREM) && (nColor != UNX_COLOR_UNIH))
+                {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+    return false;
+}
+
+bool CTransaction::IsWithdrawal(MapPrevTx const *pinputs) const
+{
+    // test general structure
+    if (vout.size() < 2 || vin.size() < 1)
+    {
+        return false;
+    }
+
+    // TODO: reverse this test to make function easier to follow
+    // test marker CTxOut
+    if (((this->nTime >= PREMIUM_START_TIME) || fTestNet) &&
+        (vout[0].nColor == UNX_COLOR_DPST) &&
+        (vout[0].nValue == 0) &&  // nonzero DPST burn protection
+        vout[0].IsOpReturn())
+    {
+        // test rest of vout
+        for (unsigned int i = 1; i < vout.size(); ++i)
+        {
+            if (vout[i].nColor != UNX_COLOR_UNIH)
+            {
+                return false;
+            }
+        }
+        // test inputs if given -- that all inputs are DPST
+        if (pinputs)
+        {
+            MapPrevTx const &inputs = *pinputs;
+            for (unsigned int i = 0; i < vin.size(); ++i)
+            {
+                COutPoint prevout = vin[i].prevout;
+                MapPrevTx::const_iterator mi = inputs.find(prevout.hash);
+                if (mi == inputs.end())
+                {
+                    throw std::runtime_error("IsWithdrawal() : prevout.hash not found");
+                }
+                int nColor = mi->second.second.vout[prevout.n].nColor;
+                if (nColor != UNX_COLOR_DPST)
+                {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+    return false;
 }
 
 
@@ -624,10 +721,11 @@ bool CTransaction::CheckTransaction() const
 
     // Check for output color consistency (input checking is done for accept)
     // coinbase vout can be many colored because of transaction fees
-    if (!IsCoinBase())
+    // note that IsCoinbase, IsDeposit, and IsWithdrawal check color consistency
+    if (!(IsCoinBase() || IsDeposit() || IsWithdrawal()))
     {
         int nColor = GetColor();
-        int nFeeColor = FEE_COLOR[nColor];
+        int nFeeColor = GetFeeColor();
         std::vector<CTxOut>::const_iterator oit;
         for (oit = vout.begin() + 1; oit != vout.end(); ++oit)
         {
@@ -649,7 +747,7 @@ bool CTransaction::CheckTransaction() const
         if (txout.IsEmpty() && !IsCoinBase() && !IsCoinStake())
             return DoS(100, error("CTransaction::CheckTransaction() : txout empty for user transaction"));
         if (txout.nValue < 0)
-              return DoS(100, error("CTransaction::CheckTransaction() : txout.nValue negative"));
+            return DoS(100, error("CTransaction::CheckTransaction() : txout.nValue negative"));
         if (txout.nValue > MAX_MONEY[nColorOut])
             return DoS(100, error("CTransaction::CheckTransaction() : txout.nValue too high"));
         vValueOut[nColorOut] += txout.nValue;
@@ -687,14 +785,22 @@ bool CTransaction::CheckTransaction() const
     return true;
 }
 
-int64_t CTransaction::GetMinFee(unsigned int nBlockSize, enum GetMinFee_mode mode, unsigned int nBytes) const
+// calculated in the currency in which the fees are *collected*
+int64_t CTransaction::GetMinFee(const CBlockIndex* pindexPrev, unsigned int nBlockSize,
+                                enum GetMinFee_mode mode, unsigned int nBytes) const
 {
+    // will happen for dummy transactions
+    if (!pindexPrev)
+    {
+       pindexPrev = pindexBest;
+    }
+
     if (this->IsCoinBase() || this->IsCoinStake())
     {
          return 0;
     }
     int nColor = this->GetColor();
-    int nFeeColor = FEE_COLOR[nColor];
+    int nFeeColor = this->GetFeeColor();  // currency in which fee is COLLECTED
 
     // Base fee is either MIN_TX_FEE or MIN_RELAY_TX_FEE
     int64_t nBaseFee = (mode == GMF_RELAY) ? MIN_RELAY_TX_FEE[nFeeColor] : MIN_TX_FEE[nFeeColor];
@@ -705,9 +811,19 @@ int64_t CTransaction::GetMinFee(unsigned int nBlockSize, enum GetMinFee_mode mod
     // To limit dust spam, require MIN_TX_FEE/MIN_RELAY_TX_FEE if any output is less than 0.01
     if (nMinFee < nBaseFee)
     {
-        BOOST_FOREACH(const CTxOut& txout, vout)
-            if (txout.nValue < CENT[nColor])
+        for (unsigned int i = 0; i < vout.size(); ++i)
+        {
+            // deposit: vout[0] is PRM, an atomic so comparison to CENT is meaningless
+            // withdrawal: vout[0] is burn 0 DPT marker, also meaningless
+            if ((i==0) && (IsDeposit() || IsWithdrawal()))
+            {
+                continue;
+            }
+            if (vout[i].nValue < CENT[nColor])
+            {
                 nMinFee = nBaseFee;
+            }
+        }
     }
 
     // Raise the price as the block approaches full
@@ -720,9 +836,11 @@ int64_t CTransaction::GetMinFee(unsigned int nBlockSize, enum GetMinFee_mode mod
         nMinFee *= MAX_BLOCK_SIZE_GEN / (MAX_BLOCK_SIZE_GEN - nNewBlockSize);
     }
 
-    if (nVersion >= 2) {
+    // fees were 100x too much and the extra fees were never included
+    if ((pindexPrev->nHeight + 1) >= FEE_ADJUSTMENT_01_BLOCK) {
+       nMinFee /= 100;
        // ensure they pay their service fees, which are tacked on flat
-       nMinFee += this->GetSwiftFee();
+       nMinFee += this->GetServiceFee();
        // ensure they pay their OP_RETURN fees, which are also tacked on flat
        nMinFee += this->GetOpRetFee();
     }
@@ -731,23 +849,25 @@ int64_t CTransaction::GetMinFee(unsigned int nBlockSize, enum GetMinFee_mode mod
     {
         nMinFee = MAX_MONEY[nFeeColor];
     }
+
     return nMinFee;
 }
 
-// Swift Fee
-int64_t CTransaction::GetSwiftFee() const {
-    int nFeeColor = FEE_COLOR[this->GetColor()];
-    int64_t nSwiftFee = 0;
-    nSwiftFee = COMMENT_FEE_PER_CHAR[nFeeColor] * strTxComment.size();
-    return nSwiftFee;
+// Service Fee (calculated in currency in which fees are *collected*)
+int64_t CTransaction::GetServiceFee() const {
+    int nFeeColor = this->GetFeeColor();
+    int64_t nServiceFee = 0;
+    nServiceFee = COMMENT_FEE_PER_CHAR[nFeeColor] * strTxComment.size();
+    return nServiceFee;
 }
 
 
 // OP_RETURN Fees: Encourage use of services
 // You get 1 stealth secret free for each non OP_RETURN Output
 // But you pay for non OP_RETURN outputs
+// calculated in currency in which fees are *collected*
 int64_t CTransaction::GetOpRetFee() const {
-    int nFeeColor = FEE_COLOR[this->GetColor()];
+    int nFeeColor = this->GetFeeColor();
     std::vector<uint8_t> vchR;
     opcodetype opCode;
 
@@ -809,10 +929,12 @@ int64_t CTransaction::GetOpRetFee() const {
     return nOpRetFee;
 }
 
-
 bool CTxMemPool::accept(CTxDB& txdb, CTransaction &tx, bool fCheckInputs,
                         bool* pfMissingInputs)
 {
+    // no reason why multisig should be treated differently for accept to mempool
+    static const bool fMultiSig = true;
+
     AssertLockHeld(cs_main);
     if (pfMissingInputs)
         *pfMissingInputs = false;
@@ -871,8 +993,7 @@ bool CTxMemPool::accept(CTxDB& txdb, CTransaction &tx, bool fCheckInputs,
         }
     }
 
-    int nColor = tx.GetColor();
-    int nFeeColor = FEE_COLOR[nColor];
+    int nFeeColor = tx.GetFeeColor();
 
     if (fCheckInputs)
     {
@@ -914,24 +1035,43 @@ bool CTxMemPool::accept(CTxDB& txdb, CTransaction &tx, bool fCheckInputs,
                           error("AcceptToMemoryPool : too many sigops %s, %d > %d",
                                 hash.ToString().c_str(), nSigOps, MAX_TX_SIGOPS));
 
-
-        // fees are only assessed in the fee color (nFeeColor)
+        // fees paid, calculated as nFeeColor
+        // NOTE: ensures tx has minimum fees
         int64_t nFees;
-        if (nFeeColor == nColor)
+        if (tx.IsDeposit(&mapInputs))
         {
-              nFees = tx.GetValueIn(mapInputs, nColor) - tx.GetValueOut(nColor);
+            nFees = tx.GetValueIn(mapInputs, UNX_COLOR_UNIH) - tx.GetValueOut(UNX_COLOR_DPST);
+            if (fDebug)
+            {
+                printf("CTxMemPool::accept(): Is deposit %s\n",
+                                                      hash.ToString().c_str());
+            }
+
+        }
+        else if (tx.IsWithdrawal(&mapInputs))
+        {
+            // "view" DPST inputs with interest applied
+            nFees = tx.GetMaxWithdrawal(mapInputs) - tx.GetValueOut(UNX_COLOR_UNIH);
+            if (fDebug)
+            {
+                printf("CTxMemPool::accept(): Is withdrawal %s\n",
+                                                      hash.ToString().c_str());
+            }
         }
         else
         {
-              std::map<int, int64_t> mapValuesOut;
-              tx.FillValuesOut(mapValuesOut);
-              nFees = tx.GetValueIn(mapInputs, nFeeColor) - mapValuesOut[nFeeColor];
+            nFees = tx.GetValueIn(mapInputs, nFeeColor) - tx.GetValueOut(nFeeColor);
+            if (fDebug)
+            {
+                printf("CTxMemPool::accept(): Is not W/D %s\n",
+                                                      hash.ToString().c_str());
+            }
         }
 
         unsigned int nSize = ::GetSerializeSize(tx, SER_NETWORK, PROTOCOL_VERSION);
 
         // Don't accept it if it can't get into a block (assume block is 1% full?)
-        int64_t txMinFee = tx.GetMinFee(MAX_BLOCK_SIZE/100, GMF_RELAY, nSize);
+        int64_t txMinFee = tx.GetMinFee(pindexBest, MAX_BLOCK_SIZE/100, GMF_RELAY, nSize);
         if (nFees < txMinFee)
             return error("CTxMemPool::accept() : not enough fees %s, %" PRId64 " < %" PRId64,
                          hash.ToString().c_str(),
@@ -954,7 +1094,7 @@ bool CTxMemPool::accept(CTxDB& txdb, CTransaction &tx, bool fCheckInputs,
                 nLastTime = nNow;
                 // -limitfreerelay unit is thousand-bytes-per-minute
                 // At default rate it would take over a month to fill 1GB
-                if (dFreeCount > GetArg("-limitfreerelay", 15)*10*1000 && !IsFromMe(tx))
+                if (dFreeCount > GetArg("-limitfreerelay", 15)*10*1000 && !IsFromMe(tx, fMultiSig))
                     return error("CTxMemPool::accept() : free transaction rejected by rate limiter");
                 if (fDebug)
                     printf("Rate limit dFreeCount: %g => %g\n", dFreeCount, dFreeCount+nSize);
@@ -965,7 +1105,7 @@ bool CTxMemPool::accept(CTxDB& txdb, CTransaction &tx, bool fCheckInputs,
         // Check against previous transactions
         // This is done last to help prevent CPU exhaustion denial-of-service attacks.
         if (!tx.ConnectInputs(txdb, mapInputs, mapUnused, CDiskTxPos(1,1,1),
-                                                 pindexBest, false, false, STANDARD_SCRIPT_VERIFY_FLAGS))
+		              pindexBest, false, false, STANDARD_SCRIPT_VERIFY_FLAGS))
         {
             return error("CTxMemPool::accept() : ConnectInputs failed %s", hash.ToString().substr(0,10).c_str());
         }
@@ -1206,12 +1346,6 @@ bool GetTransaction(const uint256 &hash, CTransaction &tx, uint256 &hashBlock)
 }
 
 
-
-
-
-
-
-
 //////////////////////////////////////////////////////////////////////////////
 //
 // CBlock and CBlockIndex
@@ -1382,6 +1516,7 @@ struct AMOUNT GetProofOfStakeReward(const CBlockIndex* pindexPrev)
     {
         printf("GetProofOfStakeReward(): stake=%s; create=%s %s\n", COLOR_TICKER[nStakeColor],
                          FormatMoney(stSubsidy.nValue, nMintColor).c_str(), COLOR_TICKER[nMintColor]);
+        printf("     nSupply: %s\n", FormatMoney(nSupply, nMintColor).c_str());
     }
 
     return stSubsidy;
@@ -1819,8 +1954,76 @@ unsigned int CTransaction::GetP2SHSigOpCount(const MapPrevTx& inputs) const
     return nSigOps;
 }
 
-bool CTransaction::ConnectInputs(CTxDB& txdb, MapPrevTx inputs, map<uint256,
-                                 CTxIndex>& mapTestPool, const CDiskTxPos& posThisTx,
+int64_t CTransaction::GetMaxWithdrawal(const MapPrevTx inputs)
+{
+    // TODO: the next three constants seem very buried here
+    // testnet interest needs to be much higher for faster testing
+    // but is elevated with the step calculation below, not directly here
+    static const int nPctMaxInterest = 33;
+    static const int nPctInterestStep = 3;  // steps down the % ever year
+    static const int nPctMinInterest = 3;   // minimum ever
+    static const int SPY = 31556736;  // seconds per year
+    static const int SPD = 86400;     // seconds per day
+    static const int SPM = 60;        // seconds per minute
+    // because interest is expressed as %
+    static const int HSPD = 864;      // hundred-seconds per day
+    int nYears = (this->nTime - nLaunchTime) / SPY;
+    int nInterest = std::max(nPctMinInterest, nPctMaxInterest - nYears * nPctInterestStep);
+    int64_t nTxMaxWD = 0;
+    int64_t nCentUNIH = CENT[UNX_COLOR_UNIH];
+    // 1. times vary, so calculate interest for every input separately
+    // 2. inputs compound separately
+    // 3. compounding is per day (good enough, reduces calcs by 720x
+    for (unsigned int j = 0; j < vin.size(); j++)
+    {
+        COutPoint prevout = vin[j].prevout;
+         // in some case inputs will be a subset of vin
+        MapPrevTx::const_iterator it = inputs.find(prevout.hash);
+        if (it == inputs.end())
+        {
+            continue;
+        }
+        const CTransaction& txPrev = it->second.second;
+
+        if (txPrev.vout[prevout.n].nColor == UNX_COLOR_DPST)
+        {
+            int nAge = this->nTime - txPrev.nTime;
+            // you can't earn interest on partial days (mainnet)
+            // compounding daily reduces computation of interest by 740x
+            // compared to compounding by block
+            // not being able to earn interest on partial days removes incentive
+            // to try to compound more quickly by spamming the chain
+            int nSteps = nAge / SPD;
+            // testnet granularity is 1 minute for faster testing
+            // this also raises the testnet effective interest rate by 1440x
+            if (fTestNet)
+            {
+                nSteps = nAge / SPM;
+            }
+            int64_t nInputMaxOut = txPrev.vout[prevout.n].nValue;
+            // compound in discrete steps to avoid floating point discrepancies
+            for (int d = 0; d < nSteps; ++d)
+            {
+               // avoid overflow by calculating cents and sub-cent separately
+               int64_t nCents = nInputMaxOut / nCentUNIH;
+               int64_t nSubCent = nInputMaxOut % nCentUNIH;
+               nInputMaxOut += nCentUNIH * ((nCents * HSPD * nInterest) / SPY);
+               nInputMaxOut += (nSubCent * HSPD * nInterest) / SPY;
+            }
+            nTxMaxWD += nInputMaxOut;
+        }
+        else
+        {
+            printf("GetMaxWithdrawal(): Input is not DPT\n");
+        }
+    }
+    // withdrawals have specific structure where fees are payed in withdrawal
+    // currency so might as well account for it here
+    return nTxMaxWD;
+}
+
+bool CTransaction::ConnectInputs(CTxDB& txdb, MapPrevTx inputs,
+                                 map<uint256, CTxIndex>& mapTestPool, const CDiskTxPos& posThisTx,
                                  const CBlockIndex* pindexBlock, bool fBlock, bool fMiner, unsigned int flags)
 {
     // Take over previous transactions' spent pointers
@@ -1852,9 +2055,10 @@ bool CTransaction::ConnectInputs(CTxDB& txdb, MapPrevTx inputs, map<uint256,
             if (txPrev.nTime > nTime)
                 return DoS(100, error("ConnectInputs() : transaction timestamp earlier than input transaction"));
 
+            // TODO: check Withdrawal marker too
             if (txPrev.vout[prevout.n].IsEmpty())
             {
-	        return DoS(1, error("ConnectInputs() : special marker is not spendable"));
+                return DoS(1, error("ConnectInputs() : special marker is not spendable"));
             }
 
             // Check for negative or overflow input values
@@ -1862,12 +2066,10 @@ bool CTransaction::ConnectInputs(CTxDB& txdb, MapPrevTx inputs, map<uint256,
             vValueIn[nInputColor] += txPrev.vout[prevout.n].nValue;
             if (!MoneyRange(txPrev.vout[prevout.n].nValue, nInputColor) ||
                 !MoneyRange(vValueIn[nInputColor], nInputColor))
+            {
                 return DoS(100, error("ConnectInputs() : txin values out of range"));
-
+            }
         }
-
-        int nColor = this->GetColor();
-        int nFeeColor = FEE_COLOR[nColor];
 
         // The first loop above does all the inexpensive checks.
         // Only if ALL inputs pass do we perform expensive ECDSA signature checks.
@@ -1908,38 +2110,93 @@ bool CTransaction::ConnectInputs(CTxDB& txdb, MapPrevTx inputs, map<uint256,
             }
         }
 
+
+        int nColor = this->GetColor();
+        int nFeeColor = this->GetFeeColor();
+
         // multicurrency: coinstake is zero sum except for lost maturity
         //                new mint goes in coinbase tx, even when PoS
         // if (!IsCoinStake())
         {
+            // NOTE: this loop checks to make sure outputs are not too much
             // txs are fully multicurrency, check all colors
             for (int i = 1; i < N_COLORS; ++i)
             {
-                if (vValueIn[i] < GetValueOut(i))
+                int64_t nValueOut = GetValueOut(i);
+                if (vValueIn[i] < nValueOut)
                 {
-                    return DoS(100, error("ConnectInputs() : for currency %d: %s value in (%" PRId64 ") < value out (%" PRId64 ")",
+                    // case 1: deposit (DPT is output but none input)
+                    if ((i == UNX_COLOR_DPST) && this->IsDeposit(&inputs))
+                    {
+                        // compare against tx fee elsewhere
+                        if (vValueIn[UNX_COLOR_UNIH] < nValueOut)
+                        {
+                            return DoS(100, error("ConnectInputs() : for currency %d: %s value in (%"
+                                                     PRId64 ") < deposit (%" PRId64 ")",
+                                                     i, GetHash().ToString().substr(0,10).c_str(),
+                                                     vValueIn[UNX_COLOR_UNIH], nValueOut));
+                        }
+                    } 
+                    // case 2: withdrawal (UNH is output but none input)
+                    else if ((i == UNX_COLOR_UNIH) && this->IsWithdrawal(&inputs))
+                    {
+                        int64_t nMaxWithdrawal = GetMaxWithdrawal(inputs);
+                        if ((nMaxWithdrawal - GetMinFee(pindexBlock->pprev)) < nValueOut)
+                        {
+                            return DoS(100, error("ConnectInputs() : for currency %d: %s max withdraw (%"
+                                                     PRId64 ") < value out (%" PRId64 ")",
+                                                     i, GetHash().ToString().substr(0,10).c_str(),
+                                                     nMaxWithdrawal, nValueOut));
+                        }
+                    }
+                    // case 3: regular spend
+                    else
+                    {
+                        return DoS(100, error("ConnectInputs() : for currency %d: %s value in (%" PRId64 ") < value out (%" PRId64 ")",
                                              i, GetHash().ToString().substr(0,10).c_str(),
-                                             vValueIn[i], GetValueOut(i)));
+                                             vValueIn[i], nValueOut));
+                    }
                 }
             }
 
             // Tally transaction fees -- coinstake has no tx fees
+            // NOTE: this test makes sure ensures minimal fees are paid
             if (!IsCoinStake())
             {
+                // fees *actually* paid
                 int64_t nTxFee;
                 int64_t nTxChangeFee; // why? delegate fees: rounded change --> fee
                 if (nColor == nFeeColor)
                 {
-                    nTxFee = vValueIn[nColor] - GetValueOut(nColor);
+                    // withdrawal: color of tx (principal output) is UNH and fee is UNH
+                    if (IsWithdrawal())
+                    {
+                        // look at withdrawal inputs after interest applied
+                        nTxFee = GetMaxWithdrawal(inputs) - GetValueOut(UNX_COLOR_UNIH);
+                    }
+                    else
+                    {
+                        nTxFee = vValueIn[nColor] - GetValueOut(nColor);
+                    }
                     nTxChangeFee = 0;
                 }
                 else
                 {
-                    std::map<int, int64_t> mapValuesOut;
-                    FillValuesOut(mapValuesOut);
-                    // in case of no fee change, int64_t default init will be 0
-                    nTxFee = vValueIn[nFeeColor] - mapValuesOut[nFeeColor];
-                    nTxChangeFee = vValueIn[nColor] - mapValuesOut[nColor];
+                    // deposit: color of tx (principal output) is DPT and fee is UNH
+                    if (IsDeposit())
+                    {
+                        nTxFee = vValueIn[UNX_COLOR_UNIH] - GetValueOut(UNX_COLOR_DPST);
+                        nTxChangeFee = 0;
+                    }
+                    else
+                    {
+                        std::map<int, int64_t> mapValuesOut;
+                        FillValuesOut(mapValuesOut);
+                        // in case of no fee change, int64_t default init will be 0
+                        nTxFee = vValueIn[nFeeColor] - mapValuesOut[nFeeColor];
+                        // change unclaimed by sender can be claimed by miner as "fees"
+                        nTxChangeFee = vValueIn[nColor] - mapValuesOut[nColor];
+                    }
                 }
 
                 if (nTxFee < 0)
@@ -1954,11 +2211,11 @@ bool CTransaction::ConnectInputs(CTxDB& txdb, MapPrevTx inputs, map<uint256,
                 }
 
                 // enforce transaction fees for every block
-                if (nTxFee < GetMinFee())
+                if (nTxFee < GetMinFee(pindexBlock->pprev))
                 {
                     return fBlock? DoS(100, error("ConnectInputs() : %s not paying required fee=%s, paid=%s",
                               GetHash().ToString().substr(0,10).c_str(),
-                              FormatMoney(GetMinFee(), nFeeColor).c_str(),
+                              FormatMoney(GetMinFee(pindexBlock->pprev), nFeeColor).c_str(),
                               FormatMoney(nTxFee, nFeeColor).c_str())) : false;
                 }
 
@@ -1987,9 +2244,13 @@ bool CTransaction::ClientConnectInputs()
     if (IsCoinBase())
         return false;
 
+    // IMPORTANT: this will not have valid CTxIndexes
+    MapPrevTx mapInputs;
+
     // Take over previous transactions' spent pointers
     {
         LOCK(mempool.cs);
+        const CBlockIndex* pindexPrev = pindexBest;
         // inputs can be any color
         std::vector<int64_t> vValueIn(N_COLORS, 0);
         for (unsigned int i = 0; i < vin.size(); i++)
@@ -1998,7 +2259,9 @@ bool CTransaction::ClientConnectInputs()
             COutPoint prevout = vin[i].prevout;
             if (!mempool.exists(prevout.hash))
                 return false;
+
             CTransaction& txPrev = mempool.lookup(prevout.hash);
+            mapInputs[prevout.hash].second = txPrev;
 
             if (prevout.n >= txPrev.vout.size())
                 return false;
@@ -2029,9 +2292,32 @@ bool CTransaction::ClientConnectInputs()
         std::map<int, int64_t> mapValuesOut;
         FillValuesOut(mapValuesOut);
         std::map<int, int64_t>::iterator oit;
+        // NOTE: simple test to ensure outputs don't exceed inputs (-fees for dep/wd)
         for (oit = mapValuesOut.begin(); oit != mapValuesOut.end(); ++oit)
         {
-              if (oit->second > vValueIn[oit->first])
+              int nOutputColor = oit->first;
+              int64_t nOutputValue = oit->second;
+              if (IsDeposit(&mapInputs))
+              {
+                  if (nOutputColor == UNX_COLOR_DPST)
+                  {
+                      if ((nOutputValue + GetMinFee(pindexPrev)) > vValueIn[UNX_COLOR_UNIH])
+                      {
+                          return false;
+                      }
+                  }
+              }
+              else if (IsWithdrawal(&mapInputs))
+              {
+                  if (nOutputColor == UNX_COLOR_UNIH)
+                  {
+                      if (nOutputValue > GetMaxWithdrawal(mapInputs) - GetMinFee(pindexPrev))
+                      {
+                          return false;
+                      }
+                  }
+              }
+              else if (nOutputValue > vValueIn[nOutputColor])
               {
                   return false;
               }
@@ -2040,9 +2326,6 @@ bool CTransaction::ClientConnectInputs()
 
     return true;
 }
-
-
-
 
 bool CBlock::DisconnectBlock(CTxDB& txdb, CBlockIndex* pindex)
 {
@@ -2112,8 +2395,6 @@ bool CBlock::ConnectBlock(CTxDB& txdb, CBlockIndex* pindex, bool fJustCheck)
     {
         uint256 hashTx = tx.GetHash();
 
-        int nColor = tx.GetColor();
-
         // Do not allow blocks that contain transactions which 'overwrite' older transactions,
         // unless those are already completely spent.
         // If such overwrites are allowed, coinbases and transactions depending upon those
@@ -2151,6 +2432,8 @@ bool CBlock::ConnectBlock(CTxDB& txdb, CBlockIndex* pindex, bool fJustCheck)
                                                 idx, tx.vout[idx].nColor));
             }
         }
+
+        int nColor = tx.GetColor();
 
         // tally vValueOut
         // all tx can have multiple output colors
@@ -2241,28 +2524,99 @@ bool CBlock::ConnectBlock(CTxDB& txdb, CBlockIndex* pindex, bool fJustCheck)
                 // }
             }
 
+            // nIOFeeColor is needed becuase deposits and withdrawals simultaneously
+            // create and destroy currency, which means the nIOColor in the following
+            // loop is not the color that the fee is collected in.
+            int nIOFeeColor;
+
+            // NOTE: this loop calculates the fees that can actually be collected
             // It is possible to move coinstake to fees.
             // Movement of stake to fees is caught above for non-scavengable stake.
             for (int nIOColor = 1; nIOColor < N_COLORS; ++nIOColor)
             {
+                int64_t nFeeIO = mapValuesIn[nIOColor] - mapValuesOut[nIOColor];
+                int64_t nMinFeeIO = 0;
+
+                // fees are a network requirement, might as well start enforcing them here
+                if ((tx.nTime >= PREMIUM_START_TIME) && pindex->pprev)
+                {
+                    nMinFeeIO = tx.GetMinFee(pindex->pprev);
+                }
+
+                if (nFeeIO < nMinFeeIO)
+                {
+                    if (tx.IsDeposit(&mapInputs) && (nIOColor == UNX_COLOR_DPST))
+                    {
+                        // got here because outputs were DPT but inputs were UNH (ie no DPT in)
+                        // even though outputs are DPT, collected fees will be UNH
+                        nFeeIO = mapValuesIn[UNX_COLOR_UNIH] - mapValuesOut[UNX_COLOR_DPST];
+                        if (fDebug)
+                        {
+                            printf("ConnectBlock(): Deposit fees collectible: %s\n",
+                                   FormatMoney(nFeeIO, UNX_COLOR_UNIH).c_str());
+                        }
+                        if (nFeeIO < nMinFeeIO)
+                        {
+                            return DoS(100, error("ConnectBlock() : not enough fees (currency %s, tx: %s)\n",
+                                                   COLOR_TICKER[nIOColor], tx.GetHash().ToString().c_str()));
+                        }
+                        nIOFeeColor = UNX_COLOR_UNIH;
+                    }
+                    else if (tx.IsWithdrawal(&mapInputs) && (nIOColor == UNX_COLOR_UNIH))
+                    {
+                        // got here because outputs were UNH but inputs were DPT (ie no UNH in)
+                        // fees are same as outputs
+                        nFeeIO = tx.GetMaxWithdrawal(mapInputs) - mapValuesOut[UNX_COLOR_UNIH];
+                        if (fDebug)
+                        {
+                            printf("ConnectBlock(): Withdrawal fees collectible: %s\n",
+                                   FormatMoney(nFeeIO, UNX_COLOR_UNIH).c_str());
+                        }
+                        if (nFeeIO < nMinFeeIO)
+                        {
+                            return DoS(100, error("ConnectBlock() : not enough fees (currency %s, tx: %s)\n",
+                                                   COLOR_TICKER[nIOColor], tx.GetHash().ToString().c_str()));
+                        }
+                        nIOFeeColor = UNX_COLOR_UNIH;
+                    }
+                    else
+                    {
+                        return DoS(100, error("ConnectBlock() : outputs exceeds inputs (currency %s, tx: %s)\n",
+                                                   COLOR_TICKER[nIOColor], tx.GetHash().ToString().c_str()));
+                    }
+                }
+                else
+                {
+                    if (tx.IsDeposit(&mapInputs) && (nIOColor == UNX_COLOR_UNIH))
+                    {
+                        // got here because inputs were UNIH but outputs were DPT (ie no UNH out)
+                        // for deposit, fees are calculated by looking at DPST
+                        continue;
+                    }
+                    if (tx.IsWithdrawal(&mapInputs) && (nIOColor == UNX_COLOR_DPST))
+                    {
+                        // got here because inputs were DPT but outputs were UNH (ie no DPT out)
+                        // for withdrawal, fees are calculated by looking at UNIH
+                        continue;
+                    }
+                    nIOFeeColor = nIOColor;
+                }
+
                 // If fees are not scavengable, it makes no sense to collect them even
-                //      when not being scavenged.
-                if (!SCAVENGABLE[nIOColor])
+                //      when not being scavenged -- because fees are burned for PoS anyway
+                if (!SCAVENGABLE[nIOFeeColor])
                 {
                     continue;
                 }
-                int64_t nFeeIO = mapValuesIn[nIOColor] - mapValuesOut[nIOColor];
-                if (nFeeIO < 0)
-                {
-                   return DoS(100, error("ConnectBlock() : outputs exceeds inputs (currency %s, tx: %s\n",
-                                                   COLOR_TICKER[nIOColor], tx.GetHash().ToString().c_str()));
-                }
-                vFees[nIOColor] += nFeeIO;
+
+                vFees[nIOFeeColor] += nFeeIO;
             }
 
             if (!tx.ConnectInputs(txdb, mapInputs, mapQueuedChanges, posThisTx,
                                                      pindex, true, false, flags))
+            {
                 return false;
+            }
         }
 
         mapQueuedChanges[hashTx] = CTxIndex(posThisTx, tx.vout.size());
@@ -2377,12 +2731,41 @@ bool CBlock::ConnectBlock(CTxDB& txdb, CBlockIndex* pindex, bool fJustCheck)
     pindex->nCoinbaseColor = vtx[0].GetColor();
     for (int i = 1; i < N_COLORS; ++i)
     {
+        // vMoneySupply (and vTotalMint) lacks enough elements for DPT
+        if (i == UNX_COLOR_DPST)
+        {
+            continue;
+        }
+
+        // remember: this is a complete block so
+        //           vValueOut and vValueIn include reward, fees, and scavenged fees
         // confusing equation, but think of it as
         //     subtracting the noncoinbase (fees) from all (noncoinbase & coinbase)
         //     yielding just coinbase
+        // premium deposit interest is added to coinbase, which is synonym for "created coins"
+        // for sake of simplicity, client will not keep track of fraction of money in DPT
+        //    and it is meaningless anyway, because the amount of UNH that the DPT represents
+        //    is contingent on "age" of DPT, which varies between depostis
         pindex->vCoinbase[i] = vValueOut[i] - vValueIn[i] + vFees[i] - vScavengedFees[i];
         pindex->vMoneySupply[i] = (pindex->pprev? pindex->pprev->vMoneySupply[i] : 0) +
                                                                    vValueOut[i] - vValueIn[i];
+        if (i == UNX_COLOR_UNIH)
+        {
+            int64_t delta = vValueOut[UNX_COLOR_DPST] - vValueIn[UNX_COLOR_DPST];
+            pindex->vCoinbase[i] += delta;        
+            pindex->vMoneySupply[i] += delta;
+        }
+    }
+
+    // FIXME: this isn't exactly right, won't work for scavenging,  but doesn't matter for pure PoS
+    if ((pindex->nTime >= PREMIUM_START_TIME) || fTestNet)
+    {
+        // TODO: consolidate this logic and vTotalMint logic above with a loop here
+        int64_t nTotalMintRewardPrev = (pindex->pprev ? pindex->pprev->vTotalMint[UNX_COLOR_UNIH] : 0);
+        pindex->vTotalMint[UNX_COLOR_UNIH] = nTotalMintRewardPrev +
+                                             pindex->vCoinbase[UNX_COLOR_UNIH] +
+                                             vScavengedFees[UNX_COLOR_UNIH] -
+                                             vFees[UNX_COLOR_UNIH];
     }
 
     // check for unspendable outputs to adjust money supply and total mint
@@ -2409,6 +2792,7 @@ bool CBlock::ConnectBlock(CTxDB& txdb, CBlockIndex* pindex, bool fJustCheck)
                          continue;
                      }
                  }
+
                  // subtract burned coins from both money supply and total mint
                  if (whichType == TX_NULL_DATA)
                  {
@@ -3333,7 +3717,6 @@ bool CBlock::SignBlock(CWallet& wallet, int64_t nFees[])
         int idx = rand() % vColors.size();
         int nColor = vColors[idx];
 
-
         // TODO: get rid of nSearchInterval
         int64_t nSearchInterval = 1;
         if (wallet.CreateCoinStake(nColor, wallet, nBits, nSearchInterval,
@@ -3480,10 +3863,10 @@ bool LoadBlockIndex(bool fAllowNew)
 
     if (fTestNet)
     {
-        for (int i = 0; i < 4; ++i)
-        {
-           pchMessageStart[i] = pchMessageStartTestnet[i];
-        }
+        pchMessageStart[0] = pchMessageStartTestnet[0];
+        pchMessageStart[1] = pchMessageStartTestnet[1];
+        pchMessageStart[2] = pchMessageStartTestnet[2];
+        pchMessageStart[3] = pchMessageStartTestnet[3];
 
         bnProofOfWorkLimit = bnProofOfWorkLimitTestNet;
         bnProofOfStakeLimit = bnProofOfStakeLimitTestNet;

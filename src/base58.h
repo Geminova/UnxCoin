@@ -558,6 +558,23 @@ public:
         return sAddr;
     }
 
+    int CompareTo(const CBitcoinAddress& addr) const
+    {
+        if (nVersion < addr.nVersion) return -1;
+        if (nVersion > addr.nVersion) return  1;
+        if (vchData < addr.vchData)   return -1;
+        if (vchData > addr.vchData)   return  1;
+        if (nColor < addr.nColor)   return -1;
+        if (nColor > addr.nColor)   return  1;
+        return 0;
+    }
+
+    bool operator==(const CBitcoinAddress& addr) const { return CompareTo(addr) == 0; }
+    bool operator<=(const CBitcoinAddress& addr) const { return CompareTo(addr) <= 0; }
+    bool operator>=(const CBitcoinAddress& addr) const { return CompareTo(addr) >= 0; }
+    bool operator< (const CBitcoinAddress& addr) const { return CompareTo(addr) <  0; }
+    bool operator> (const CBitcoinAddress& addr) const { return CompareTo(addr) >  0; }
+
 
     CTxDestination Get() const {
         if (!IsValid())

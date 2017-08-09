@@ -503,7 +503,7 @@ void CoinControlDialog::updateLabels(WalletModel *model, QDialog* dialog, int nC
 
 
         // Min Fee: estimate as if block is full -- CTxMemPool::accept is a hard taskmaster (bug)
-        int64_t nMinFee = txDummy.GetMinFee(1000, GMF_SEND, nBytes);
+        int64_t nMinFee = txDummy.GetMinFee(NULL, 1000, GMF_SEND, nBytes);
         
         nPayFee = max(nFee, nMinFee);
         printf("nPayFee is %" PRId64 "\n", nPayFee);

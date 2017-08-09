@@ -9,16 +9,16 @@
         <key>CFBundlePackageType</key>
         <string>APPL</string>
         <key>CFBundleGetInfoString</key>
-        <string>UnxCoin [UNH] 1.0.1.0</string>
+        <string>UnxCoin [UNH] 1.1.2.0</string>
         <key>CFBundleExecutable</key>
         <string>UnxCoin-Qt</string>
         <key>CFBundleIdentifier</key>
         <string>us.unxcoin.unxcoin-qt</string>
         <key>CFBundleShortVersionString</key>
-        <string>1.0.1.0</string>
+        <string>1.1.2.0</string>
         <key>CFBundleSignature</key>
         <string>UNxX</string>
         <key>CFBundleVersion</key>
-        <string>1.0.1.0</string>
+        <string>1.1.2.0</string>
 </dict>
 </plist>

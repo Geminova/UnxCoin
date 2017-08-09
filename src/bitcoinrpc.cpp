@@ -296,6 +296,7 @@ static const CRPCCommand vRPCCommands[] =
     { "move",                      &movecmd,                   false,  false },
     { "sendfrom",                  &sendfrom,                  false,  false },
     { "sendmany",                  &sendmany,                  false,  false },
+    { "createmultisigaddress",     &createmultisigaddress,     false,  false },
     { "addmultisigaddress",        &addmultisigaddress,        false,  false },
     { "addredeemscript",           &addredeemscript,           false,  false },
     { "getrawmempool",             &getrawmempool,             true,   false },
@@ -325,8 +326,11 @@ static const CRPCCommand vRPCCommands[] =
     { "importencryptedkey",        &importencryptedkey,        false,  false },
 #endif
     { "listunspent",               &listunspent,               false,  false },
+    { "listdeposits",              &listdeposits,              false,  false },
     { "getrawtransaction",         &getrawtransaction,         false,  false },
     { "createrawtransaction",      &createrawtransaction,      false,  false },
+    { "createrawdeposit",          &createrawdeposit,          false,  false },
+    { "createrawwithdrawal",       &createrawwithdrawal,       false,  false },
     { "decoderawtransaction",      &decoderawtransaction,      false,  false },
     { "decodescript",              &decodescript,              false,  false },
     { "signrawtransaction",        &signrawtransaction,        false,  false },
@@ -1230,12 +1234,19 @@ Array RPCConvertValues(const std::string &strMethod, const std::vector<std::stri
     if (strMethod == "burncoins"                    && n > 1) ConvertTo<double>(params[0]);
     if (strMethod == "settxfee"                     && n > 0) ConvertTo<double>(params[0]);
     if (strMethod == "getreceivedbyaddress"         && n > 1) ConvertTo<boost::int64_t>(params[1]);
+    if (strMethod == "getreceivedbyaddress"         && n > 2) ConvertTo<bool>(params[2]);
     if (strMethod == "getreceivedbyaccount"         && n > 1) ConvertTo<boost::int64_t>(params[1]);
+    if (strMethod == "getreceivedbyaccount"         && n > 2) ConvertTo<bool>(params[2]);
+    if (strMethod == "getreceivedbyaccount"         && n > 3) ConvertTo<bool>(params[3]);
     if (strMethod == "listreceivedbyaddress"        && n > 0) ConvertTo<boost::int64_t>(params[0]);
     if (strMethod == "listreceivedbyaddress"        && n > 1) ConvertTo<bool>(params[1]);
+    if (strMethod == "listreceivedbyaddress"        && n > 2) ConvertTo<bool>(params[2]);
     if (strMethod == "listreceivedbyaccount"        && n > 0) ConvertTo<boost::int64_t>(params[0]);
     if (strMethod == "listreceivedbyaccount"        && n > 1) ConvertTo<bool>(params[1]);
+    if (strMethod == "listreceivedbyaccount"        && n > 2) ConvertTo<bool>(params[2]);
+    if (strMethod == "listreceivedbyaccount"        && n > 3) ConvertTo<bool>(params[3]);
     if (strMethod == "getbalance"                   && n > 1) ConvertTo<boost::int64_t>(params[1]);
+    if (strMethod == "getbalance"                   && n > 3) ConvertTo<bool>(params[3]);
     if (strMethod == "getblock"                     && n > 1) ConvertTo<bool>(params[1]);
     if (strMethod == "getblockbynumber"             && n > 0) ConvertTo<boost::int64_t>(params[0]);
     if (strMethod == "getblockbynumber"             && n > 1) ConvertTo<bool>(params[1]);
@@ -1246,14 +1257,18 @@ Array RPCConvertValues(const std::string &strMethod, const std::vector<std::stri
     if (strMethod == "sendfrom"                     && n > 3) ConvertTo<boost::int64_t>(params[3]);
     if (strMethod == "listtransactions"             && n > 1) ConvertTo<boost::int64_t>(params[1]);
     if (strMethod == "listtransactions"             && n > 2) ConvertTo<boost::int64_t>(params[2]);
+    if (strMethod == "listtransactions"             && n > 3) ConvertTo<bool>(params[3]);
     if (strMethod == "getaddressbalancebyblock"     && n > 1) ConvertTo<boost::int64_t>(params[1]);
     if (strMethod == "listaccounts"                 && n > 0) ConvertTo<boost::int64_t>(params[0]);
+    if (strMethod == "listaccounts"                 && n > 1) ConvertTo<bool>(params[1]);
+    if (strMethod == "listaccounts"                 && n > 2) ConvertTo<bool>(params[2]);
     if (strMethod == "walletpassphrase"             && n > 1) ConvertTo<boost::int64_t>(params[1]);
     if (strMethod == "walletpassphrase"             && n > 2) ConvertTo<bool>(params[2]);
     if (strMethod == "getsubsidy"                   && n > 0) ConvertTo<boost::int64_t>(params[0]);
     if (strMethod == "getsubsidy"                   && n > 1) ConvertTo<boost::int64_t>(params[1]);
     if (strMethod == "getblocktemplate"             && n > 0) ConvertTo<Object>(params[0]);
     if (strMethod == "listsinceblock"               && n > 1) ConvertTo<boost::int64_t>(params[1]);
+    if (strMethod == "listsinceblock"               && n > 2) ConvertTo<bool>(params[2]);
 
     if (strMethod == "sendalert"                    && n > 2) ConvertTo<boost::int64_t>(params[2]);
     if (strMethod == "sendalert"                    && n > 3) ConvertTo<boost::int64_t>(params[3]);
@@ -1266,14 +1281,27 @@ Array RPCConvertValues(const std::string &strMethod, const std::vector<std::stri
     if (strMethod == "sendmany"                     && n > 2) ConvertTo<boost::int64_t>(params[2]);
     if (strMethod == "reservebalance"               && n > 0) ConvertTo<bool>(params[0]);
     if (strMethod == "reservebalance"               && n > 1) ConvertTo<double>(params[1]);
+    if (strMethod == "createmultisigaddress"        && n > 0) ConvertTo<boost::int64_t>(params[0]);
+    if (strMethod == "createmultisigaddress"        && n > 1) ConvertTo<Array>(params[1]);
     if (strMethod == "addmultisigaddress"           && n > 0) ConvertTo<boost::int64_t>(params[0]);
     if (strMethod == "addmultisigaddress"           && n > 1) ConvertTo<Array>(params[1]);
     if (strMethod == "listunspent"                  && n > 0) ConvertTo<boost::int64_t>(params[0]);
     if (strMethod == "listunspent"                  && n > 1) ConvertTo<boost::int64_t>(params[1]);
     if (strMethod == "listunspent"                  && n > 2) ConvertTo<Array>(params[2]);
+
+    if (strMethod == "listdeposits"                 && n > 0) ConvertTo<boost::int64_t>(params[0]);
+    if (strMethod == "listdeposits"                 && n > 1) ConvertTo<boost::int64_t>(params[1]);
+    if (strMethod == "listdeposits"                 && n > 2) ConvertTo<Array>(params[2]);
+
     if (strMethod == "getrawtransaction"            && n > 1) ConvertTo<boost::int64_t>(params[1]);
     if (strMethod == "createrawtransaction"         && n > 0) ConvertTo<Array>(params[0]);
     if (strMethod == "createrawtransaction"         && n > 1) ConvertTo<Object>(params[1]);
+    if (strMethod == "createrawdeposit"             && n > 0) ConvertTo<Array>(params[0]);
+    if (strMethod == "createrawdeposit"             && n > 1) ConvertTo<Object>(params[1]);
+    if (strMethod == "createrawdeposit"             && n > 2) ConvertTo<bool>(params[2]);
+    if (strMethod == "createrawwithdrawal"          && n > 0) ConvertTo<Array>(params[0]);
+    if (strMethod == "createrawwithdrawal"          && n > 1) ConvertTo<Object>(params[1]);
+    if (strMethod == "createrawwithdrawal"          && n > 2) ConvertTo<bool>(params[2]);
     if (strMethod == "signrawtransaction"           && n > 1) ConvertTo<Array>(params[1], true);
     if (strMethod == "signrawtransaction"           && n > 2) ConvertTo<Array>(params[2], true);
     if (strMethod == "keypoolrefill"                && n > 0) ConvertTo<boost::int64_t>(params[0]);

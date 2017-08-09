@@ -334,7 +334,7 @@ std::string HelpMessage()
 
         "  -burnkey=<key>    " + _("Random string") + "\n" +
 
-        "  -ridethewhiteunx " + _("Mint PoS bonus blocks when first nonzero of block hash is 8") + "\n" ;
+        "  -enablemultisigs  " + _("Enable rpc multisig support by default") + "\n" ;
 
     return strUsage;
 }
@@ -666,8 +666,9 @@ bool AppInit2()
         if (nTxFee > VERY_HIGH_FEE * MIN_TX_FEE[nFeeColor])
         {
             char msg[120];
-            snprintf(msg, sizeof(msg), "Warning: -paytxfee_%d is set very high! "
-                                       "This is the transaction fee you will pay if you send a transaction.", nColor);
+            snprintf(msg, sizeof(msg),
+                     "Warning: -paytxfee_%d is set very high! "
+                     "This is the transaction fee you will pay if you send a transaction.", nColor);
             InitWarning(_(msg));
         }
     }
@@ -900,7 +901,8 @@ bool AppInit2()
                 static const char *(*strAddedNodes)[1] =
                           fTestNet ? strTestNetAddedNodes : strMainNetAddedNodes;
 
-                for (unsigned int i = 0; strAddedNodes[i][0] != NULL; i++) {
+                for (unsigned int i = 0; strAddedNodes[i][0] != NULL; i++)
+                {
                    mapMultiArgs["-addnode"].push_back(strAddedNodes[i][0]);
                 }
             }

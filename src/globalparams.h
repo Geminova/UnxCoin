@@ -19,7 +19,7 @@
 #define ALLOW_DUPLICATE_DESTINATIONS 0
 
 // N_COLORS includes COLOR_NONE
-#define N_COLORS 3
+#define N_COLORS 4
 #define N_COLOR_BYTES 1
 
 // proof model
@@ -43,6 +43,13 @@
 
 
 extern bool fTestNet;
+
+//////////////////////////////////////////////////////////////////////
+
+// forks
+extern int const FEE_ADJUSTMENT_01_BLOCK;
+extern unsigned int const PREMIUM_START_TIME;
+
 
 
 // networking
@@ -81,6 +88,7 @@ typedef enum {
         UNX_COLOR_NONE = 0,
         UNX_COLOR_UNIH,           // UNIH
         UNX_COLOR_PREM,           // PREM
+        UNX_COLOR_DPST,
         UNX_COLOR_END
 } UNX_COLOR ;
 
@@ -125,6 +133,8 @@ extern const int64_t COMMENT_FEE_PER_CHAR[N_COLORS];
 
 extern const int64_t OP_RET_FEE_PER_CHAR[N_COLORS];
 
+extern const bool TRANSFERABLE[N_COLORS];
+
 extern const bool SCAVENGABLE[N_COLORS];
 
 extern const int64_t MIN_TXOUT_AMOUNT[N_COLORS];
@@ -160,6 +170,7 @@ bool CanStake(int nColorIn);
 
 int GetStakeMinConfirmations(int nColor);
 
+int IsTransferrable(int nColor);
 
 bool SplitQualifiedAddress(const std::string &qualAddress,
                               std::string &address, int &nColor, bool fDebug);

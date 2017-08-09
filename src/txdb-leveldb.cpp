@@ -357,11 +357,11 @@ bool CTxDB::LoadBlockIndex()
 
         uint256 blockHash = diskindex.GetBlockHash();
 
-        if (fDebug) {
-              printf("CTxDB::LoadBlockIndex: block %d %s\n", diskindex.nHeight, blockHash.ToString().c_str());
-              printf("                       prev %s\n", diskindex.hashPrev.ToString().c_str());
-              printf("                       next %s\n", diskindex.hashNext.ToString().c_str());
-        }
+        // if (fDebug) {
+        //       printf("CTxDB::LoadBlockIndex: block %d %s\n", diskindex.nHeight, blockHash.ToString().c_str());
+        //       printf("                       prev %s\n", diskindex.hashPrev.ToString().c_str());
+        //       printf("                       next %s\n", diskindex.hashNext.ToString().c_str());
+        // }
 
         // Construct block index object
         CBlockIndex* pindexNew       = InsertBlockIndex(blockHash);

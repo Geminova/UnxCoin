@@ -227,7 +227,31 @@ CBlock* CreateNewBlock(CWallet* pwallet, bool fProofOfStake, int64_t pFees[])
                 continue;
             }
 
-            int nFeeColor = FEE_COLOR[nColor];
+            // In and Out are accounting concepts:
+            //     In - the color of the inputs for calculating fees paid
+            //     Out - the color of the outputs for calculating fees paid
+            // Out is not equivalent to the FeeColor, which is the color that
+            // miners can collect fees in (FeeColor could be called FeeCollectionColor.
+            //     Normal Transactions: In = Out = FeeColor
+            //     Deposit: In = UNH, Out = DPT, FeeColor = UNH
+            //     Withdrawal: In = DPT, Out = UNH, FeeColor = UNH
+            // It happens that for Unxcoin, the FeeColor is always UNH
+            int nFeeOutColor = tx.GetFeeColor();
+            int nFeeInColor;
+            if (tx.IsDeposit())
+            {
+                nFeeInColor = UNX_COLOR_UNIH;
+                nFeeOutColor = UNX_COLOR_DPST;
+            }
+            else if (tx.IsWithdrawal())
+            {
+                nFeeInColor = UNX_COLOR_DPST;
+                nFeeOutColor = UNX_COLOR_UNIH;
+            }
+            else
+            {
+                nFeeInColor = nColor;
+            }
 
             COrphan* porphan = NULL;
             double dPriority = 0;
@@ -262,16 +286,43 @@ CBlock* CreateNewBlock(CWallet* pwallet, bool fProofOfStake, int64_t pFees[])
                     }
                     mapDependers[txin.prevout.hash].push_back(porphan);
                     porphan->setDependsOn.insert(txin.prevout.hash);
-                    if (nFeeColor == mempool.mapTx[txin.prevout.hash].vout[txin.prevout.n].nColor)
+
+                    if (mempool.mapTx[txin.prevout.hash].vout[txin.prevout.n].nColor == nFeeInColor)
                     {
-                        nTotalFeeIn += mempool.mapTx[txin.prevout.hash].vout[txin.prevout.n].nValue;
+                        // withdrawal: "increase" value in to max withdrawal to determine fee amount
+                        //             it is *as if* the sender provided this UNH input amount
+                        if (tx.IsWithdrawal())
+                        {
+                            // TODO: make this where mapInput is not needed
+                            MapPrevTx mapInput;
+                            mapInput[txin.prevout.hash].second = mempool.mapTx[txin.prevout.hash];
+                            nTotalFeeIn += tx.GetMaxWithdrawal(mapInput);
+                        }
+                        else
+                        {
+                            nTotalFeeIn += mempool.mapTx[txin.prevout.hash].vout[txin.prevout.n].nValue;
+                        }
                     }
                     continue;
                 }
-                int64_t nValueIn = txPrev.vout[txin.prevout.n].nValue;
+                // fall-through
+                int64_t nValueIn = 0;
                 int nInputColor = txPrev.vout[txin.prevout.n].nColor;
-                if (nFeeColor == nInputColor)
+                if (nInputColor == nFeeInColor)
                 {
+                    // withdrawal: "increase" value in to max withdrawal to determine fee amount
+                    //             it is *as if* the sender provided this UNH input amount
+                    if (tx.IsWithdrawal())
+                    {
+                        // TODO: make this where mapInput is not needed
+                        MapPrevTx mapInput;
+                        mapInput[txin.prevout.hash].second = txPrev;
+                        nValueIn += tx.GetMaxWithdrawal(mapInput);
+                    }
+                    else
+                    {
+                        nValueIn = txPrev.vout[txin.prevout.n].nValue;
+                    }
                     nTotalFeeIn += nValueIn;
                 }
 
@@ -289,10 +340,11 @@ CBlock* CreateNewBlock(CWallet* pwallet, bool fProofOfStake, int64_t pFees[])
             // client code rounds up the size to the nearest 1K. That's good, because it gives an
             // incentive to create smaller transactions.
             // For better or worse, there is no adjustment for fee change.
-            double dFeePerKb =  double(nTotalFeeIn - tx.GetValueOut(nFeeColor)) /
+            double dFeePerKb =  double(nTotalFeeIn - tx.GetValueOut(nFeeOutColor)) /
                                                                   (double(nTxSize)/1000.0);
+
             // dFeePerKb is weighted by the priority multiplier for the fee currency
-            dFeePerKb *= PRIORITY_MULTIPLIER[nFeeColor];
+            dFeePerKb *= PRIORITY_MULTIPLIER[nFeeOutColor];
 
             if (porphan)
             {
@@ -322,8 +374,7 @@ CBlock* CreateNewBlock(CWallet* pwallet, bool fProofOfStake, int64_t pFees[])
             double dFeePerKb = vecPriority.front().get<1>();
             CTransaction& tx = *(vecPriority.front().get<2>());
 
-            int nColor = tx.GetColor();
-            int nFeeColor = FEE_COLOR[nColor];
+            int nFeeCollectColor = tx.GetFeeColor();
 
             std::pop_heap(vecPriority.begin(), vecPriority.end(), comparer);
             vecPriority.pop_back();
@@ -343,10 +394,10 @@ CBlock* CreateNewBlock(CWallet* pwallet, bool fProofOfStake, int64_t pFees[])
                 continue;
 
             // Transaction fee
-            // int64_t nMinFee = tx.GetMinFee(nBlockSize, GMF_BLOCK);
+            // int64_t nMinFee = tx.GetMinFee(pindexPrev, nBlockSize, GMF_BLOCK);
 
             // Skip free transactions if we're past the minimum block size:
-            if (fSortedByFee && (dFeePerKb < vMinTxFee[nFeeColor]) &&
+            if (fSortedByFee && (dFeePerKb < vMinTxFee[nFeeCollectColor]) &&
                       (nBlockSize + nTxSize >= nBlockMinSize))
                 continue;
 
@@ -354,7 +405,7 @@ CBlock* CreateNewBlock(CWallet* pwallet, bool fProofOfStake, int64_t pFees[])
             // transactions:
             if (!fSortedByFee &&
                 ((nBlockSize + nTxSize >= nBlockPrioritySize) ||
-                 (dPriority < (PRIORITY_MULTIPLIER[nFeeColor] * COIN[nFeeColor] * 144 / 250))))
+                 (dPriority < (PRIORITY_MULTIPLIER[nFeeCollectColor] * COIN[nFeeCollectColor] * 144 / 250))))
             {
                 fSortedByFee = true;
                 comparer = TxPriorityCompare(fSortedByFee);
@@ -371,11 +422,35 @@ CBlock* CreateNewBlock(CWallet* pwallet, bool fProofOfStake, int64_t pFees[])
 
             // take all the scavengable fees
             // TODO: Maybe there is a more efficient way to do this? Need FillValuesIn/Out.
+            // nTxFees are the fees that actually enable the transaction and are paid
+            //    in the fee color
             int64_t nTxFees = 0;
             for (int i = 1; i < N_COLORS; ++i)
             {
-                int64_t txfee = tx.GetValueIn(mapInputs, i) - tx.GetValueOut(i);
-                if (i == nFeeColor)
+                int64_t txfee = 0;
+
+                if (tx.IsDeposit())
+                {
+                    if (i == UNX_COLOR_UNIH)
+                    {
+                        txfee = tx.GetValueIn(mapInputs, UNX_COLOR_UNIH) -
+                                tx.GetValueOut(UNX_COLOR_DPST);
+                    }
+                }
+                else if (tx.IsWithdrawal())
+                {
+                    if (i == UNX_COLOR_UNIH)
+                    {
+                        txfee = tx.GetMaxWithdrawal(mapInputs) -
+                                tx.GetValueOut(UNX_COLOR_UNIH);
+                    }
+                }
+                else
+                {
+                    txfee = tx.GetValueIn(mapInputs, i) - tx.GetValueOut(i);
+                }
+
+                if (i == nFeeCollectColor)
                 {
                     nTxFees = txfee;
                 }
@@ -387,8 +462,9 @@ CBlock* CreateNewBlock(CWallet* pwallet, bool fProofOfStake, int64_t pFees[])
                 }
             }
 
-            // for each transaction, fees are asessed in the fee color
-            if (nTxFees < vMinTxFee[nFeeColor])
+            // for each transaction, fees are assessed in the fee color
+            // reject transactions with too few fees
+            if (nTxFees < vMinTxFee[nFeeCollectColor])
                  continue;
 
             nTxSigOps += tx.GetP2SHSigOpCount(mapInputs);
@@ -586,7 +662,7 @@ bool CheckWork(CBlock* pblock, CWallet& wallet, CReserveKey& reservekey)
     printf("CheckWork() : new proof-of-work block found  \n  hash: %s  \ntarget: %s\n",
                                         hashBlock.GetHex().c_str(), hashTarget.GetHex().c_str());
     pblock->print();
-    printf("generated %s %s\n",
+    printf("CheckWork(): generated %s %s\n",
             FormatMoney(pblock->vtx[0].vout[0].nValue, pblock->vtx[0].vout[0].nColor).c_str(),
                                                     COLOR_TICKER[pblock->vtx[0].vout[0].nColor]);
 
