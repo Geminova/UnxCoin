@@ -49,6 +49,7 @@ extern bool fTestNet;
 // forks
 extern int const FEE_ADJUSTMENT_01_BLOCK;
 extern unsigned int const PREMIUM_START_TIME;
+extern unsigned int const FEE_FIX_01_TIME;
 
 
 

@@ -35,7 +35,8 @@ static const int DATABASE_VERSION = 70508;
 // 61016: added deposits and withdrawals (v1.1.0.0)
 //        more fine grained address comparison (v1.1.1.0)
 // 61017: moved fork back 2 weeks (v1.1.2.0)
-static const int PROTOCOL_VERSION = 61017;
+// 61018: fixing fee check (v1.1.3.0)
+static const int PROTOCOL_VERSION = 61018;
 
 // earlier versions not supported as of Feb 2012, and are disconnected
 static const int MIN_PROTO_VERSION = 209;

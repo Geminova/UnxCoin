@@ -9,8 +9,11 @@
 //////////////////////////////////////////////////////////////////////
 int const FEE_ADJUSTMENT_01_BLOCK = 64000;
 
-// Tue Aug 22 06:00:00 2017 (Mon Aug 22 23:00:00 PST 2017)
+// Tue Aug 22 06:00:00 2017 GMT (Mon Aug 22 23:00:00 PDT 2017)
 unsigned int const PREMIUM_START_TIME = 1503381600;
+
+// Tue Oct 3 05:00:00 2017 GMT (Mon Oct 2 22:00:00 PDT 2017)
+unsigned int const FEE_FIX_01_TIME = 1507006800;
 
 //////////////////////////////////////////////////////////////////////
 ///

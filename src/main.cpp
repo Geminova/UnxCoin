@@ -2538,7 +2538,9 @@ bool CBlock::ConnectBlock(CTxDB& txdb, CBlockIndex* pindex, bool fJustCheck)
                 int64_t nMinFeeIO = 0;
 
                 // fees are a network requirement, might as well start enforcing them here
-                if ((tx.nTime >= PREMIUM_START_TIME) && pindex->pprev)
+                if (((tx.nTime >= PREMIUM_START_TIME) &&
+                     ((tx.nTime < FEE_FIX_01_TIME) || (nIOColor == tx.GetFeeColor()))) &&
+                    pindex->pprev)
                 {
                     nMinFeeIO = tx.GetMinFee(pindex->pprev);
                 }
